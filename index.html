@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shira Group – Quotation Generator</title>
+<link rel="stylesheet" href="css/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+</head>
+<body>
+<header class="app-header">
+  <img src="./assets/ShiraTradeLogo.png" alt="Shira Group logo" class="logo" id="logoImg">
+  <div><h1>Quotation Generator</h1><p>Create and export professional pump quotations</p></div>
+  <div class="hdr-actions">
+    <button class="btn ghost small" onclick="document.getElementById('openFile').click()">Open previous quotation</button>
+    <button class="btn ghost small" id="saveData">Save data file</button>
+    <button class="btn ghost small" onclick="document.getElementById('logoFile').click()">Change logo</button>
+    <input type="file" id="openFile" accept=".pdf,.json" hidden><input type="file" id="logoFile" accept="image/*" hidden>
+    <p id="logoNote" hidden>The browser blocked reading assets/shira-group-logo.png (file:// restriction), so PDFs use a placeholder. Click “Change logo” once and pick your logo file.</p>
+  </div>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Quotation information</h2>
+    <div class="grid">
+      <label>SO Number *<input data-info="so" placeholder="SO1000"></label>
+      <label>Issuing Date<input data-info="date" type="date"></label>
+      <label>Customer Company Name *<input data-info="customer"></label>
+      <label>Project Name<input data-info="project"></label>
+      <label>Attention To (optional)<input data-info="attn"></label>
+      <label>Revision Number<input data-info="rev" type="number" min="0" step="1"></label>
+      <label>VAT / Tax (%)<input data-info="vat" type="number" min="0" step="any"></label>
+      <label>Pricing category (internal – not printed)<select id="tier">
+        <option value="">— not set —</option><option>Trader</option><option>Contractor</option><option>End User</option>
+      </select></label>
+    </div>
+  </section>
+
+  <section>
+    <div class="sec-bar"><h2>Quotation items</h2></div>
+    <div id="items"></div>
+    <div class="sec-bar-2"><div></div><button class="btn" id="addItem">+ Add Item</button></div>
+    <div class="card summary" id="summary"></div>
+  </section>
+
+  <section class="card">
+    <h2>Terms and conditions</h2>
+    <p class="hint">One term per line. Edit freely before exporting.</p>
+    <textarea id="terms" rows="8"></textarea>
+    <h2 style="margin-top:18px">Notes (printed under the terms, Arabic supported)</h2>
+    <textarea id="notes" rows="4" dir="auto"></textarea>
+  </section>
+
+  <section id="preview" hidden>
+    <div class="sec-bar"><h2>Quotation preview</h2></div>
+    <div class="preview-wrap"><div id="quote" class="quote"></div></div>
+  </section>
+</main>
+
+<div class="actionbar">
+  <div class="grand">Grand Total: <strong id="grand">0.00</strong> EGP</div>
+  <div class="btns">
+    <button class="btn ghost" id="resetBtn">Reset Form</button>
+    <button class="btn ghost" id="previewBtn">Preview Quotation</button>
+    <button class="btn" id="exportBtn">Export PDF</button>
+  </div>
+</div>
+<script src="js/app.js"></script>
+</body>
+</html>
