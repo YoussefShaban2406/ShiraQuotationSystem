@@ -1741,8 +1741,8 @@ const partField = (attr, label, o) => {
 // Normalizes a part number so "k 40/800", "K-40-800" and "K40800" match each other.
 const pnKey = v => String(v ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
-// Normalizes a column heading so "Price_Trader (EGP)" and "price trader" are recognized as the same column.
-const hdrKey = h => String(h ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// Normalizes a column heading so "Price_Trader (EGP)", "price trader" and "Trader Price (EGP)" are recognized as the same column.
+const hdrKey = h => String(h ?? '').toLowerCase().replace(/[^a-z0-9]/g, '').replace(/(trader|contractor|enduser)price/, 'price$1');
 
 // Cleans a text cell, and a price/number cell (blank unless it is a positive number).
 const cellText = v => String(v ?? '').trim();
@@ -1753,9 +1753,11 @@ const cellNum = v => {
 
 // Builds the part-number index from the rows of the price-list sheet (one object per row, keyed by column heading).
 // Recognized headings: PartNo, Description, ProductType, PumpCategory, Origin, Flow_m3h, Head_m,
-// Price_Trader, Price_Contractor, Price_EndUser (extra columns are ignored).
+// Price_Trader, Price_Contractor, Price_EndUser (also "Trader Price (EGP)", "Contractor Price (EGP)", "End User Price (EGP)";
+// "Part Number" works too). Extra columns are ignored.
 function setPriceList(rows, fileName) {
-  const keys = rows.length ? Object.keys(rows[0]) : [];
+  if (!rows.length) throw new Error('The sheet has headings but no products yet. Add the products under the headings and load the file again.');
+  const keys = Object.keys(rows[0]);
   const find = (...p) => keys.find(k => p.some(x => hdrKey(k).includes(x)));
   const col = {
     part: find('partno', 'partnumber') || find('part'),
@@ -1770,7 +1772,7 @@ function setPriceList(rows, fileName) {
     e: find('priceenduser')
   };
 
-  if (!col.part) throw new Error('The sheet needs a "PartNo" column.');
+  if (!col.part) throw new Error('No part-number column found. Headings seen: ' + keys.join(', ') + '. Use a heading like "Part Number" or "PartNo".');
   if (!col.desc && !col.t && !col.c && !col.e) {
     throw new Error('The sheet needs a Description column or price columns (Price_Trader, Price_Contractor, Price_EndUser).');
   }
@@ -1780,7 +1782,7 @@ function setPriceList(rows, fileName) {
 
   rows.forEach(r => {
     const part = cellText(r[col.part]);
-    if (!part) { skipped++; return; }
+    if (!part) { if (Object.values(r).some(v => cellText(v))) skipped++; return; }   // completely blank rows are ignored silently
 
     const key = pnKey(part);
     if (map.has(key)) { dups++; return; }          // the first row of a duplicated part number wins
@@ -1849,6 +1851,24 @@ function applyPartToSub(s, row) {
   s.priceT = row.t; s.priceC = row.c; s.priceE = row.e;
 }
 
+// Converts a worksheet into row objects. The heading row is the first row (within the first 15) that contains a
+// part-number heading, so titles above the table do not matter. Returns null when the sheet has no such heading.
+function sheetToRows(ws) {
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: false });
+  const isPart = c => { const k = hdrKey(c); return k.includes('partno') || k.includes('partnumber') || k === 'part'; };
+  const hi = aoa.slice(0, 15).findIndex(r => r.some(isPart));
+
+  if (hi < 0) return null;
+
+  const heads = aoa[hi];
+
+  return aoa.slice(hi + 1).map(r => {
+    const o = {};
+    heads.forEach((h, i) => { if (String(h).trim()) o[h] = r[i] ?? ''; });
+    return o;
+  });
+}
+
 // Handles the "Load price list" button: reads the Products sheet of an Excel file (or a CSV file).
 $('#priceFile').addEventListener('change', async e => {
   const f = e.target.files[0];
@@ -1867,13 +1887,20 @@ $('#priceFile').addEventListener('change', async e => {
       ? XLSX.read(await f.text(), { type: 'string' })
       : XLSX.read(await f.arrayBuffer(), { type: 'array' });
 
-    // Prefer a sheet named "Products", then any sheet with "price" in its name, then the first sheet.
-    const sheetName =
-      wb.SheetNames.find(n => /^products?$/i.test(n)) ||
-      wb.SheetNames.find(n => /price/i.test(n)) ||
-      wb.SheetNames[0];
+    // Try the sheets in this order: "Products", sheets named like a price list / catalogue, then all others;
+    // the first sheet that has a part-number heading is used.
+    const rank = n => /^products?$/i.test(n) ? 0 : /price|catalog/i.test(n) ? 1 : 2;
+    const sheets = [...wb.SheetNames].sort((a, b) => rank(a) - rank(b));
+    let rows = null;
 
-    setPriceList(XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '' }), f.name);
+    for (const n of sheets) {
+      rows = sheetToRows(wb.Sheets[n]);
+      if (rows) break;
+    }
+
+    if (!rows) throw new Error('No sheet has a part-number heading. Use a heading like "Part Number" or "PartNo" in the first rows.');
+
+    setPriceList(rows, f.name);
   } catch (err) {
     alert('Could not read the price list: ' + err.message);
   }
