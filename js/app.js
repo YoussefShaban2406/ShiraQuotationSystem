@@ -32,6 +32,9 @@ const STORE_KEY = 'shiraQuotation.v1';
 // Available types for a Sub Item.
 const SUB_TYPES = ['Accessories', 'Spare Part', 'Other'];
 
+// Pump categories offered in the item form (also used to validate the category read from the price list).
+const PUMP_CATS = ['Vertical Pump', 'Horizontal Pump', 'Submersible Pump', 'Self-Priming Pump', 'Circulation Pump'];
+
 // Internal pricing categories (never printed). Each maps to the optional tier-price field on every priced line.
 const TIERS = { 'Trader': 'priceT', 'Contractor': 'priceC', 'End User': 'priceE' };
 
@@ -384,7 +387,7 @@ function subItemHTML(s) {
   return `<div class="lrow" data-sid="${s.id}">
     <label>Type<select data-sf="type">${SUB_TYPES.map(o =>
     `<option${o === s.type ? ' selected' : ''}>${o}</option>`).join('')}</select></label>
-    <label>Part Number<input data-sf="partNo" value="${esc(s.partNo)}"></label>
+    ${partField('data-sf', 'Part Number', s)}
     <label>Description<textarea data-sf="desc" rows="3">${esc(s.desc)}</textarea></label>
     <label>Origin<input data-sf="origin" value="${esc(s.origin)}"></label>
     <label>Unit<input data-sf="unit" value="${esc(s.unit)}"></label>
@@ -408,9 +411,9 @@ function itemHTML(it, i) {
     <div class="card-h"><h3>Item ${i + 1}</h3><button class="btn danger small" data-act="rm-item">Remove Item</button></div>
     <div class="heading-preview" data-out="heading"></div>
     <div class="grid">${select('type', 'Item Type', ['Booster Set', 'Single Pump', 'Other'], it.type)}
-      ${select('cat', 'Pump Category', ['Vertical Pump', 'Horizontal Pump', 'Submersible Pump', 'Self-Priming Pump', 'Circulation Pump'], it.cat)}</div>
+      ${select('cat', 'Pump Category', PUMP_CATS, it.cat)}</div>
     <div class="group"><h4>Pump information</h4><div class="grid">
-      ${field('partNo', 'Pump Part Number', it.partNo)}${field('desc', 'Pump Description', it.desc)}${numField('price', 'Pump Unit Price (EGP)', it.price)}
+      ${partField('data-f', 'Pump Part Number', it)}${field('desc', 'Pump Description', it.desc)}${numField('price', 'Pump Unit Price (EGP)', it.price)}
       ${field('typeName', 'Heading pump type (optional)', it.typeName, 'text', 'placeholder="e.g. Horizontal End-suction"')}${field('origin', 'Origin', it.origin, 'text', 'placeholder="e.g. Italy / DAB"')}
       <div class="imgbox"><label>Pump Image (optional)<input type="file" accept="image/*" data-img></label>${it.img ? `<img class="thumb" src="${it.img}" alt=""><button class="btn danger small" data-act="rm-img">Remove image</button>` : ''}</div>
       ${tierInputs(it, 'data-f')}</div></div>
@@ -779,12 +782,10 @@ const pumpImageHTML = it => it.img
 // Builds the quotation section for one item, including its heading,
 // specifications, pump photo, price table (pump, local items, sub items),
 // and subtotal.
-function itemQuoteHTML(it, idx) {
-  const c = calc(it);
+// Builds the price-table rows of one item (pump, local items, sub items). Shared by the HTML preview and the PDF export
+// so both always show the same descriptions, quantities and prices.
+function itemRows(it, c) {
   const rows = [];
-  const f = num(it.flow);
-  const h = num(it.head);
-
   // Add the main pump as a price-table row when pump information or price exists.
   if (it.partNo || it.desc || c.pumpUnit) {
     const pn = (it.partNo || '').trim();
@@ -819,6 +820,18 @@ function itemQuoteHTML(it, idx) {
       total: s.total,
       img: s.img
     }));
+
+  return rows;
+}
+
+// Builds the quotation section for one item, including its heading,
+// specifications, pump photo, price table (pump, local items, sub items),
+// and subtotal.
+function itemQuoteHTML(it, idx) {
+  const c = calc(it);
+  const rows = itemRows(it, c);
+  const f = num(it.flow);
+  const h = num(it.head);
 
   // Convert flow into m³/h and retain the original entered value when applicable.
   const flowTxt = f
@@ -1137,22 +1150,8 @@ $('#openFile').addEventListener('change', async e => {
 
   try {
     if (/\.pdf$/i.test(f.name)) {
-      // Find the embedded SHIRAQ quotation data in the PDF bytes.
-      const m = new TextDecoder('latin1')
-        .decode(await f.arrayBuffer())
-        .match(/SHIRAQ:([A-Za-z0-9+\/=]+)/);
-
-      if (!m) {
-        throw new Error(
-          'This PDF has no editable data. Only PDFs exported from this tool can be re-opened.'
-        );
-      }
-
-      // Decode the embedded data and import it into the application.
-      importState(
-        JSON.parse(decodeURIComponent(escape(atob(m[1])))),
-        f.name
-      );
+      // Read the embedded quotation data (new and older PDFs) and import it into the application.
+      importState(await extractQuotationPayload(await f.arrayBuffer()), f.name);
     } else {
       // Read and import a standard JSON quotation file.
       importState(JSON.parse(await f.text()), f.name);
@@ -1181,59 +1180,6 @@ $('#saveData').addEventListener('click', () => {
 /* ==========================================================================
  * 13. PDF FOOTER, FILE NAME / REVISION NUMBERING, AND EXPORT
  * ========================================================================== */
-
-// Draws the company footer and page number on every generated PDF page.
-// The footer includes the logo, company details, registration numbers,
-// and page numbering.
-function drawFooters(pdf) {
-  const pages = pdf.internal.getNumberOfPages();
-  const W = 210;
-  const reg = regLine('  |  ');
-
-  // Add the footer to every page of the generated PDF.
-  for (let p = 1; p <= pages; p++) {
-    pdf.setPage(p);
-
-    // Draw a horizontal line above the footer.
-    pdf.setDrawColor(11, 42, 74);
-    pdf.setLineWidth(0.6);
-    pdf.line(10, 268, W - 10, 268);
-
-    // Calculate logo dimensions while preserving its aspect ratio.
-    const lh = 14;
-    const lw = Math.min(30, lh * logo.w / logo.h);
-
-    // Add the company logo to the footer.
-    try {
-      pdf.addImage(logo.url, 'PNG', 10, 271, lw, lh);
-    } catch (e) {
-      // Continue without the footer logo if adding the image fails.
-    }
-
-    const x = 10 + lw + 5;
-
-    // Set footer font size and text color.
-    pdf.setFontSize(8);
-    pdf.setTextColor(60, 70, 85);
-
-    // Print the company name and website in bold.
-    pdf.setFont('helvetica', 'bold');
-    pdf.text(`${COMPANY.name}  |  ${COMPANY.website}`, x, 274);
-
-    // Print the remaining company details in regular font.
-    pdf.setFont('helvetica', 'normal');
-    pdf.text(COMPANY.address, x, 278);
-    pdf.text(`${COMPANY.phone}  |  ${COMPANY.email}`, x, 282);
-
-    // Print registration numbers when actual values have been provided.
-    if (reg) {
-      pdf.text(reg, x, 286);
-    }
-
-    // Print the current page number and total page count.
-    pdf.text(`Page ${p} of ${pages}`, W - 10, 286, { align: 'right' });
-  }
-}
 
 /* ---- PDF file name & revision numbering ----
    File name = prefix + SO number + (revision > 0 ? "-" + revision : "") + ".pdf"
@@ -1356,17 +1302,387 @@ function fitPreview() {
 
 window.addEventListener('resize', fitPreview);
 
-// Validates required fields, loads the logo, renders the quotation,
-// exports it as an A4 PDF, adds footers and embedded quotation data,
-// and restores the interface after the export completes.
+/* ==========================================================================
+ * 13B. NATIVE TEXT PDF EXPORT AND PDF DATA EXTRACTION (pdf-lib)
+ * ========================================================================== */
+
+// A4 page geometry in PDF points (1 mm = 2.835 pt): margins, and the bottom area reserved for the footer.
+const PG = { w: 595.28, h: 841.89, ml: 28, mr: 28, mt: 32, mb: 84 };
+
+// Matches Arabic / Hebrew characters (used to choose right-to-left drawing).
+const RTL_RE = /[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/;
+
+// Splits a line into Latin/number runs (odd items) and the text between them (even items).
+const LTR_RUN = /([A-Za-z0-9][A-Za-z0-9.,%:/+\-_()@#&]*)/;
+
+// Set to true only if Arabic comes out with its letters in reversed order in the exported PDF (see the notes).
+const ARABIC_REVERSE = false;
+
+// Decodes a Base64 string or a data URL into bytes.
+const b64ToBytes = s => Uint8Array.from(atob(String(s).split(',').pop()), c => c.charCodeAt(0));
+
+// Reads the editable quotation data embedded in a PDF. New PDFs are parsed with pdf-lib (Keywords field);
+// PDFs exported by the older version are also found by searching the raw bytes. Throws a clear error otherwise.
+async function extractQuotationPayload(buf) {
+  const find = s => /SHIRAQ:([A-Za-z0-9+\/=]+)/.exec(s || '');
+  let m = null;
+
+  if (typeof PDFLib !== 'undefined') {
+    try {
+      const doc = await PDFLib.PDFDocument.load(buf, { updateMetadata: false, ignoreEncryption: true });
+      m = find(doc.getKeywords());
+    } catch (e) {
+      // Not parsable by pdf-lib: fall back to the raw search below.
+    }
+  }
+
+  if (!m) m = find(new TextDecoder('latin1').decode(buf));
+
+  if (!m) {
+    throw new Error('This PDF has no editable quotation data. Only PDFs exported from this tool can be re-opened.');
+  }
+
+  try {
+    return JSON.parse(decodeURIComponent(escape(atob(m[1]))));
+  } catch (e) {
+    throw new Error('The quotation data inside this PDF is damaged and could not be read.');
+  }
+}
+
+// Builds the quotation as a native-text PDF (selectable, searchable, vector) and returns its bytes.
+// Layout is done here (wrapping, tables, pagination, footer); nothing is rendered to an image except real photos/logo.
+async function buildQuotationPdf() {
+  const { PDFDocument, StandardFonts, rgb } = PDFLib;
+  const pdf = await PDFDocument.create();
+  const RGB = (r, g, b) => rgb(r / 255, g / 255, b / 255);
+  const C = { navy: RGB(11, 42, 74), ink: RGB(28, 39, 51), mute: RGB(91, 103, 117), line: RGB(196, 204, 215),
+              panel: RGB(241, 244, 248), head: RGB(227, 233, 241), white: RGB(255, 255, 255) };
+
+  // Fonts: embedded Unicode fonts (needs fontkit + js/fonts.js); plain Helvetica only if those are missing.
+  let F;
+  if (typeof fontkit !== 'undefined' && typeof PDF_FONT_REGULAR_B64 !== 'undefined') {
+    pdf.registerFontkit(fontkit);
+    F = {
+      r: await pdf.embedFont(b64ToBytes(PDF_FONT_REGULAR_B64), { subset: true }),
+      b: await pdf.embedFont(b64ToBytes(PDF_FONT_BOLD_B64), { subset: true })
+    };
+  } else {
+    F = { r: await pdf.embedFont(StandardFonts.Helvetica), b: await pdf.embedFont(StandardFonts.HelveticaBold) };
+  }
+
+  // Embed every real image once (logo, pump photos, sub-item photos).
+  const imgs = new Map();
+  const addImg = async url => {
+    if (!url || imgs.has(url)) return;
+    try {
+      const bytes = b64ToBytes(url);
+      imgs.set(url, /^data:image\/png/i.test(url) ? await pdf.embedPng(bytes) : await pdf.embedJpg(bytes));
+    } catch (e) {
+      imgs.set(url, null);
+    }
+  };
+  await addImg(logo.url);
+  for (const it of state.items) {
+    await addImg(it.img);
+    for (const s of it.subItems) await addImg(s.img);
+  }
+
+  const W = PG.w - PG.ml - PG.mr;
+  const pages = [];
+  let page, y;
+
+  // Converts a distance from the top of the page to a PDF y coordinate.
+  const top = v => PG.h - v;
+
+  // Starts a new page and puts the cursor at the top margin.
+  const newPage = () => { page = pdf.addPage([PG.w, PG.h]); pages.push(page); y = PG.mt; };
+
+  // Starts a new page when less than h points remain above the footer; returns true if it did.
+  const need = h => { if (PG.h - PG.mb - y < h) { newPage(); return true; } return false; };
+
+  // Width of a text in points.
+  const wd = (s, f, z) => f.widthOfTextAtSize(s, z);
+
+  // True when the first letter of the text is Arabic/Hebrew (paragraph runs right to left).
+  const isRtl = s => { const m = String(s).match(/\p{L}/u); return !!m && RTL_RE.test(m[0]); };
+
+  // Splits a word that is wider than the box into pieces that fit.
+  const breakWord = (w, f, z, maxW) => {
+    const out = []; let cur = '';
+    for (const ch of w) { if (cur && wd(cur + ch, f, z) > maxW) { out.push(cur); cur = ''; } cur += ch; }
+    return out.concat(cur);
+  };
+
+  // Wraps text (explicit line breaks kept) into lines no wider than maxW.
+  const wrap = (str, f, z, maxW) => {
+    const out = [];
+    String(str ?? '').split('\n').forEach(par => {
+      let cur = '';
+      par.split(' ').forEach(word => {
+        const t = cur ? cur + ' ' + word : word;
+        if (!cur || wd(t, f, z) <= maxW) { cur = t; return; }
+        out.push(cur); cur = word;
+      });
+      out.push(cur);
+    });
+    return out.flatMap(l => (wd(l, f, z) > maxW && !l.includes(' ')) ? breakWord(l, f, z, maxW) : [l]);
+  };
+
+  // Draws one line of text inside a box (x = left edge, boxW = width). Arabic runs and Latin/number runs are
+  // placed in the right visual order: right-to-left paragraphs start at the right edge.
+  const drawLine = (s, x, base, z, f, col, align = 'l', boxW = 0) => {
+    s = String(s ?? '');
+    if (!s) return;
+    let parts = [s];
+    const rtl = isRtl(s);
+    if (RTL_RE.test(s)) parts = s.split(LTR_RUN).filter(p => p !== '');
+    const seg = p => (ARABIC_REVERSE && RTL_RE.test(p) && !LTR_RUN.test(p)) ? [...p].reverse().join('') : p;
+    const widths = parts.map(p => wd(seg(p), f, z));
+    const total = widths.reduce((a, b) => a + b, 0);
+    let start = align === 'r' ? x + boxW - total : align === 'c' ? x + (boxW - total) / 2 : x;
+    if (rtl) {
+      let cur = start + total;
+      parts.forEach((p, k) => { cur -= widths[k]; page.drawText(seg(p), { x: cur, y: base, size: z, font: f, color: col }); });
+    } else {
+      parts.forEach((p, k) => { page.drawText(seg(p), { x: start, y: base, size: z, font: f, color: col }); start += widths[k]; });
+    }
+  };
+
+  // Draws a wrapped paragraph at the cursor (right-aligned when it is Arabic) and moves the cursor down.
+  // nb = true skips automatic page breaks (used inside blocks whose height was reserved beforehand).
+  const para = (str, x, w, z, f, col, lh, nb) => {
+    const rtl = isRtl(str);
+    wrap(str, f, z, w).forEach(l => {
+      if (!nb) need(lh);
+      drawLine(l, x, top(y + z), z, f, col, rtl ? 'r' : 'l', w);
+      y += lh;
+    });
+  };
+
+  // Draws "Label: text" with a bold label and wrapped text (the text before a colon is bold).
+  const flowLabel = (label, text, x, w, z, lh, lcol, nb) => {
+    const lw = wd(label, F.b, z) + 3;
+    const words = String(text).split(' ');
+    let line = '', i = 0;
+    while (i < words.length) {
+      const t = line ? line + ' ' + words[i] : words[i];
+      if (line && wd(t, F.r, z) > w - lw) break;
+      line = t; i++;
+    }
+    if (!nb) need(lh);
+    drawLine(label, x, top(y + z), z, F.b, lcol, 'l', w);
+    drawLine(line, x + lw, top(y + z), z, F.r, C.ink, 'l', w - lw);
+    y += lh;
+    const rest = words.slice(i).join(' ');
+    if (rest) para(rest, x, w, z, F.r, C.ink, lh, nb);
+  };
+
+  // Draws a filled rectangle (optionally with a border) given its top-left corner.
+  const box = (x, topY, w, h, fill, border) =>
+    page.drawRectangle({ x, y: top(topY + h), width: w, height: h, color: fill, borderColor: border, borderWidth: border ? 0.5 : 0 });
+
+  // Scales an embedded image to fit inside maxW x maxH.
+  const fit = (im, maxW, maxH) => { const k = Math.min(maxW / im.width, maxH / im.height, 1); return { w: im.width * k, h: im.height * k }; };
+
+  // ---------- header ----------
+  newPage();
+  const logoImg = imgs.get(logo.url);
+  let hdrH = 0;
+  if (logoImg) {
+    const d = fit(logoImg, 190, 62);
+    page.drawImage(logoImg, { x: PG.ml, y: top(y + d.h), width: d.w, height: d.h });
+    hdrH = d.h;
+  }
+  const info = state.info;
+  const right = PG.w - PG.mr;
+  let ry = y;
+  ['Shira For Trade & Agencies', '5 Khaled Ibn El Walid St - Sheraton Heliopolis Area', 'Sheraton Heliopolis Egypt'].forEach(t => {
+    drawLine(t, PG.ml, top(ry + 8), 8, F.r, C.mute, 'r', W); ry += 11;
+  });
+  ry += 3;
+  [['SO Number:', quoteNumber()], ['Date:', fmtDate(info.date)], ['Revision:', String(info.rev || 0)]].forEach(([k, v]) => {
+    const vw = wd(v, F.r, 9.5);
+    drawLine(v, right - vw, top(ry + 9.5), 9.5, F.r, C.ink);
+    drawLine(k, right - vw - 4 - wd(k, F.b, 9.5), top(ry + 9.5), 9.5, F.b, C.ink);
+    ry += 13;
+  });
+  y = Math.max(y + hdrH, ry) + 8;
+  page.drawLine({ start: { x: PG.ml, y: top(y) }, end: { x: right, y: top(y) }, thickness: 2, color: C.navy });
+  y += 12;
+
+  // ---------- customer box ----------
+  const cust = [['Customer', info.customer, true], ['Project', info.project, false]];
+  if (info.attn) cust.push(['Attention', info.attn, false]);
+  const custH = cust.length * 15 + 12;
+  box(PG.ml, y, W, custH, C.panel);
+  box(PG.ml, y, 3, custH, C.navy);
+  cust.forEach(([k, v, bold], n) => {
+    const base = top(y + 14 + n * 15);
+    drawLine(k, PG.ml + 12, base, 9, F.r, C.mute);
+    drawLine(v, PG.ml + 95, base, 9.5, bold ? F.b : F.r, C.ink, isRtl(v) ? 'r' : 'l', W - 105);
+  });
+  y += custH + 14;
+
+  // ---------- price table ----------
+  const COLS = [{ w: 26, a: 'c', h: 'No.' }, { w: 0, a: 'l', h: 'Description' }, { w: 58, a: 'c', h: 'Origin' },
+                { w: 46, a: 'c', h: 'Quantity' }, { w: 76, a: 'r', h: 'Unit Price (EGP)' }, { w: 80, a: 'r', h: 'Total (EGP)' }];
+  COLS[1].w = W - COLS.reduce((a, c) => a + c.w, 0);
+
+  // Draws the table header row (repeated on every page the table continues on).
+  const tableHead = () => {
+    let x = PG.ml;
+    COLS.forEach(c => { box(x, y, c.w, 20, C.head, C.line); drawLine(c.h, x + 4, top(y + 13.5), 8, F.b, C.navy, c.a, c.w - 8); x += c.w; });
+    y += 20;
+  };
+
+  // Calculates the height of a table row (text lines or image, whichever is taller).
+  const rowInfo = (r, n) => {
+    const cells = [String(n), r.desc, r.origin, trim2(r.qty), money(r.price), money(r.total)];
+    const lines = wrap(cells[1], F.r, 8.5, COLS[1].w - 8);
+    const sub = r.img && imgs.get(r.img) ? fit(imgs.get(r.img), 85, 51) : null;
+    const oLines = wrap(cells[2], F.r, 8.5, COLS[2].w - 8);
+    const h = Math.max(lines.length * 11 + (sub ? sub.h + 4 : 0), oLines.length * 11, 11) + 9;
+    return { cells, lines, oLines, sub, h };
+  };
+
+  // Draws one table row at the cursor.
+  const drawRow = (r, n) => {
+    const ri = rowInfo(r, n);
+    let x = PG.ml;
+    COLS.forEach((c, k) => { box(x, y, c.w, ri.h, undefined, C.line); x += c.w; });
+    x = PG.ml;
+    COLS.forEach((c, k) => {
+      if (k === 1) {
+        const rtl = isRtl(r.desc);
+        ri.lines.forEach((l, i) => drawLine(l, x + 4, top(y + 12 + i * 11), 8.5, F.r, C.ink, rtl ? 'r' : 'l', c.w - 8));
+        if (ri.sub) page.drawImage(imgs.get(r.img), { x: x + 4, y: top(y + 6 + ri.lines.length * 11 + ri.sub.h), width: ri.sub.w, height: ri.sub.h });
+      } else if (k === 2) {
+        ri.oLines.forEach((l, i) => drawLine(l, x + 4, top(y + 12 + i * 11), 8.5, F.r, C.ink, 'c', c.w - 8));
+      } else {
+        drawLine(ri.cells[k], x + 4, top(y + 12), 8.5, F.r, C.ink, c.a, c.w - 8);
+      }
+      x += c.w;
+    });
+    y += ri.h;
+  };
+
+  // ---------- items ----------
+  state.items.forEach((it, idx) => {
+    const c = calc(it);
+    const rows = itemRows(it, c);
+    const f = num(it.flow), h = num(it.head);
+    const flowTxt = f ? `${trim2(toM3h(f, it.flowU))} m³/h` + (it.flowU !== 'm³/h' ? ` (entered ${trim2(f)} ${it.flowU})` : '') : '';
+    const headTxt = h ? `${trim2(toMeters(h, it.headU))} m` + (it.headU !== 'm' ? ` (entered ${trim2(h)} ${it.headU})` : '') : '';
+    const d = Math.floor(num(it.duty)), s = Math.floor(num(it.standby));
+    const colA = [['Pump Part No.:', it.partNo], ['Pump Category:', it.cat], ['Flow Rate:', flowTxt], ['Head:', headTxt]].filter(r => r[1]);
+    const colB = [['Drive:', it.vfd ? 'Variable Speed (VFD)' : 'Fixed Speed'], ['Duty / Standby:', d || s ? `${d} Duty / ${s} Standby` : ''], ['Pump Description:', it.desc]].filter(r => r[1]);
+    const pumpIm = it.img && imgs.get(it.img) ? fit(imgs.get(it.img), 110, 100) : null;
+    const colW = (W - (pumpIm ? 120 : 0) - 16) / 2;
+    const linesOf = col => col.reduce((n, r) => n + wrap(r[0] + ' ' + r[1], F.r, 8.5, colW).length, 0);
+    const specH = Math.max(linesOf(colA), linesOf(colB)) * 11.5 + 6;
+    const headLines = wrap(`${idx + 1}. ${buildHeading(it)}`, F.b, 10, W - 20);
+    const headH = headLines.length * 13 + 10;
+    const specBlock = Math.max(specH, pumpIm ? pumpIm.h + 6 : 0);
+
+    // Keep the heading, details, table header and the first row together on one page.
+    need(headH + 6 + specBlock + 20 + (rows.length ? rowInfo(rows[0], 1).h : 20));
+
+    box(PG.ml, y, W, headH, C.navy);
+    headLines.forEach((l, i) => drawLine(l, PG.ml + 10, top(y + 7 + 10 + i * 13 - 2), 10, F.b, C.white, isRtl(l) ? 'r' : 'l', W - 20));
+    y += headH + 6;
+
+    const y0 = y;
+    [[colA, PG.ml], [colB, PG.ml + colW + 16]].forEach(([col, x]) => {
+      y = y0;
+      col.forEach(([k, v]) => flowLabel(k, v, x, colW, 8.5, 11.5, C.mute, true));
+    });
+    if (pumpIm) page.drawImage(imgs.get(it.img), { x: right - pumpIm.w, y: top(y0 + pumpIm.h), width: pumpIm.w, height: pumpIm.h });
+    y = y0 + specBlock;
+
+    tableHead();
+    if (!rows.length) { box(PG.ml, y, W, 20, undefined, C.line); drawLine('No priced items entered.', PG.ml + 4, top(y + 13), 8.5, F.r, C.ink); y += 20; }
+    rows.forEach((r, n) => {
+      if (need(rowInfo(r, n + 1).h)) tableHead();
+      drawRow(r, n + 1);
+    });
+
+    // Item subtotal strip.
+    need(24);
+    box(PG.ml, y, W, 20, C.panel, C.line);
+    const stx = `Item ${idx + 1} Subtotal: ${money(c.subtotal)} EGP`;
+    drawLine(stx, PG.ml, top(y + 13.5), 9, F.b, C.navy, 'r', W - 6);
+    y += 20 + 16;
+  });
+
+  // ---------- totals ----------
+  const t = totals();
+  const trows = state.items.map((it, k) => [`Item ${k + 1} Subtotal`, `${money(calc(it).subtotal)} EGP`])
+    .concat([['Subtotal Before VAT', `${money(t.sub)} EGP`], [`VAT (${trim2(num(state.info.vat))}%)`, `${money(t.vat)} EGP`]]);
+  need(trows.length * 19 + 28 + 10);
+  trows.forEach(([k, v]) => {
+    box(PG.ml, y, W, 19, undefined, C.line);
+    drawLine(k, PG.ml + 6, top(y + 13), 9, F.r, C.ink);
+    drawLine(v, PG.ml, top(y + 13), 9, F.r, C.ink, 'r', W - 6);
+    y += 19;
+  });
+  box(PG.ml, y, W, 28, C.navy);
+  drawLine('GRAND TOTAL INCLUDING VAT', PG.ml + 6, top(y + 18), 10.5, F.b, C.white);
+  drawLine(`${money(t.total)} EGP`, PG.ml, top(y + 18), 10.5, F.b, C.white, 'r', W - 6);
+  y += 28 + 18;
+
+  // ---------- terms and conditions ----------
+  need(40);
+  drawLine('Terms and Conditions', PG.ml, top(y + 11), 11, F.b, C.navy);
+  y += 16;
+  page.drawLine({ start: { x: PG.ml, y: top(y) }, end: { x: right, y: top(y) }, thickness: 1.5, color: C.navy });
+  y += 8;
+  state.terms.split('\n').filter(l => l.trim()).forEach(l => {
+    const m = l.match(/^([^:]{1,40}):\s*(.*)$/);
+    if (m) flowLabel(m[1] + ':', m[2], PG.ml, W, 9, 12.5, C.ink); else para(l, PG.ml, W, 9, F.r, C.ink, 12.5);
+    y += 2;
+  });
+
+  // ---------- notes (Arabic supported, right-to-left) ----------
+  const noteLines = state.notes.split('\n').filter(l => l.trim());
+  if (noteLines.length) {
+    y += 8; need(30);
+    page.drawLine({ start: { x: PG.ml, y: top(y) }, end: { x: right, y: top(y) }, thickness: 0.5, color: C.line });
+    y += 10;
+    noteLines.forEach(l => { para(l, PG.ml, W, 9.5, F.r, C.ink, 15); });
+  }
+
+  // ---------- footer + page numbers on every page ----------
+  const reg = regLine('  |  ');
+  pages.forEach((pg, n) => {
+    page = pg;
+    const base = 74;
+    pg.drawLine({ start: { x: PG.ml, y: base }, end: { x: right, y: base }, thickness: 1, color: C.navy });
+    let tx = PG.ml;
+    if (logoImg) { const d = fit(logoImg, 80, 30); pg.drawImage(logoImg, { x: PG.ml, y: base - 8 - d.h, width: d.w, height: d.h }); tx = PG.ml + d.w + 12; }
+    [[`${COMPANY.name}  |  ${COMPANY.website}`, F.b], [COMPANY.address, F.r], [`${COMPANY.phone}  |  ${COMPANY.email}`, F.r], [reg, F.r]]
+      .filter(r => r[0]).forEach(([s, f], i) => drawLine(s, tx, base - 18 - i * 10, 7.5, f, i ? C.mute : C.ink));
+    const pt = `Page ${n + 1} of ${pages.length}`;
+    drawLine(pt, PG.ml, base - 18, 8, F.r, C.mute, 'r', W);
+  });
+
+  // ---------- metadata: title + the editable (customer-safe) quotation data ----------
+  pdf.setTitle(`Quotation ${quoteNumber()}`);
+  pdf.setAuthor(COMPANY.name);
+  pdf.setCreator('Shira Group Quotation Generator');
+  pdf.setProducer('pdf-lib');
+  pdf.setKeywords(['SHIRAQ:' + encodeState()]);
+
+  return pdf.save({ useObjectStreams: false });
+}
+
+// Validates required fields, loads the logo, builds the native-text PDF and downloads it
+// (file name from the SO number and revision), then restores the interface.
 async function exportPdf() {
   const i = state.info;
 
   // Require the SO number and customer company name before exporting.
   if (!i.so.trim() || !i.customer.trim()) {
-    return alert(
-      'Please enter the SO Number and Customer Company Name before exporting.'
-    );
+    return alert('Please enter the SO Number and Customer Company Name before exporting.');
   }
 
   // Require at least one quotation item.
@@ -1374,77 +1690,234 @@ async function exportPdf() {
     return alert('Add at least one item.');
   }
 
-  // Check that the PDF generation library is available.
-  if (typeof html2pdf === 'undefined') {
-    return alert(
-      'PDF library not loaded. Check your internet connection and reload.'
-    );
+  // Check that the PDF library is available.
+  if (typeof PDFLib === 'undefined') {
+    return alert('PDF library not loaded. Check your internet connection and reload.');
   }
 
-  // Load the latest logo and prepare the quotation preview.
+  // Load the latest logo and keep the HTML preview in sync.
   logo = await loadLogo();
   showPreview();
 
-  const el = $('#quote');
   const btn = $('#exportBtn');
-
-  // Apply export styling and disable the button while exporting.
-  el.style.transform = 'none';
-  el.classList.add('exporting');
   btn.disabled = true;
   btn.textContent = 'Exporting…';
 
   try {
-    // Configure and generate the PDF.
-    await html2pdf().set({
-      // Margins in millimetres: top, left, bottom, right.
-      // The bottom margin reserves space for the repeated footer.
-      margin: [12, 6, 30, 6],
-
-      // File name from the SO number and revision, e.g. Shira_Quotation_S12205-1.pdf.
-      filename: pdfFileName(),
-
-      // Configure image quality for the PDF.
-      image: { type: 'jpeg', quality: 0.98 },
-
-      // Configure HTML-to-canvas rendering.
-      html2canvas: { scale: 2, useCORS: true, scrollY: 0 },
-
-      // Configure the PDF page format and orientation.
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
-
-      // Avoid splitting quotation item sections and table rows where possible.
-      pagebreak: { mode: ['css', 'legacy'], avoid: ['.q-block', 'tr'] }
-    })
-      .from(el)
-      .toPdf()
-      .get('pdf')
-      .then(pdf => {
-        // Add the company footer to every page.
-        drawFooters(pdf);
-
-        // Store quotation data in the PDF metadata so the app can attempt
-        // to reopen the quotation later.
-        pdf.setProperties({
-          title: `Quotation ${quoteNumber()}`,
-          keywords: 'SHIRAQ:' + encodeState()
-        });
-      })
-      .save();
+    const bytes = await buildQuotationPdf();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    a.download = pdfFileName();
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   } catch (err) {
-    // Inform the user if PDF generation fails.
     alert('PDF export failed: ' + err.message);
   } finally {
-    // Restore the normal interface whether export succeeds or fails.
-    el.classList.remove('exporting');
     btn.disabled = false;
     btn.textContent = 'Export PDF';
-
-    // Refresh the quotation document after the export.
     renderQuote();
     fitPreview();
   }
 }
+
+/* ==========================================================================
+ * 15. PART-NUMBER PRICE LIST (Excel / CSV lookup)
+ * ========================================================================== */
+
+// The loaded price list. It is kept in memory only, so load it again after reloading the page.
+// Quotations keep a copy of the data they were filled with, so reopening one never re-prices it.
+let priceList = null;
+
+// Short messages shown under part-number fields, keyed by item / sub-item id (not saved with the quotation).
+const pnNotes = {};
+
+// Generates a part-number input with suggestions from the loaded price list and a small status line.
+const partField = (attr, label, o) => {
+  const n = pnNotes[o.id];
+  return `<label>${label}<input ${attr}="partNo" list="pnList" autocomplete="off" value="${esc(o.partNo)}">` +
+    `<small class="pn-note" style="font-weight:400;color:${n && n.ok ? '#1d6b2e' : '#a32727'}">${n ? esc(n.text) : ''}</small></label>`;
+};
+
+// Normalizes a part number so "k 40/800", "K-40-800" and "K40800" match each other.
+const pnKey = v => String(v ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+// Normalizes a column heading so "Price_Trader (EGP)" and "price trader" are recognized as the same column.
+const hdrKey = h => String(h ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+// Cleans a text cell, and a price/number cell (blank unless it is a positive number).
+const cellText = v => String(v ?? '').trim();
+const cellNum = v => {
+  const n = parseFloat(String(v ?? '').replace(/,/g, ''));
+  return isFinite(n) && n > 0 ? String(n) : '';
+};
+
+// Builds the part-number index from the rows of the price-list sheet (one object per row, keyed by column heading).
+// Recognized headings: PartNo, Description, ProductType, PumpCategory, Origin, Flow_m3h, Head_m,
+// Price_Trader, Price_Contractor, Price_EndUser (extra columns are ignored).
+function setPriceList(rows, fileName) {
+  const keys = rows.length ? Object.keys(rows[0]) : [];
+  const find = (...p) => keys.find(k => p.some(x => hdrKey(k).includes(x)));
+  const col = {
+    part: find('partno', 'partnumber') || find('part'),
+    desc: find('description', 'desc'),
+    type: find('producttype'),
+    cat: find('pumpcategory', 'category'),
+    origin: find('origin'),
+    flow: find('flow'),
+    head: find('head'),
+    t: find('pricetrader'),
+    c: find('pricecontractor'),
+    e: find('priceenduser')
+  };
+
+  if (!col.part) throw new Error('The sheet needs a "PartNo" column.');
+  if (!col.desc && !col.t && !col.c && !col.e) {
+    throw new Error('The sheet needs a Description column or price columns (Price_Trader, Price_Contractor, Price_EndUser).');
+  }
+
+  const map = new Map();
+  let dups = 0, skipped = 0;
+
+  rows.forEach(r => {
+    const part = cellText(r[col.part]);
+    if (!part) { skipped++; return; }
+
+    const key = pnKey(part);
+    if (map.has(key)) { dups++; return; }          // the first row of a duplicated part number wins
+
+    map.set(key, {
+      part,
+      desc: cellText(r[col.desc]),
+      type: cellText(r[col.type]),
+      cat: cellText(r[col.cat]),
+      origin: cellText(r[col.origin]),
+      flow: cellNum(r[col.flow]),
+      head: cellNum(r[col.head]),
+      t: cellNum(r[col.t]),
+      c: cellNum(r[col.c]),
+      e: cellNum(r[col.e])
+    });
+  });
+
+  if (!map.size) throw new Error('No part numbers found in the price list.');
+
+  priceList = { name: fileName, map, dups, skipped };
+
+  // Suggestions shown while typing a part number.
+  $('#pnList').innerHTML = [...map.values()]
+    .map(r => `<option value="${esc(r.part)}" label="${esc(r.desc)}"></option>`).join('');
+
+  // Part numbers typed before the list was loaded are looked up now (only items with no description or price yet).
+  state.items.forEach(it => {
+    [[it, true], ...it.subItems.map(s => [s, false])].forEach(([o, isPump]) => {
+      const n = pnNotes[o.id];
+      const row = n && n.needsList && !o.desc && !o.price && map.get(pnKey(o.partNo));
+      if (!row) return;
+      (isPump ? applyPartToItem : applyPartToSub)(o, row);
+      pnNotes[o.id] = { ok: true, text: 'Filled from the price list.', filled: true };
+    });
+  });
+  renderItems();
+  refresh();
+
+  $('#priceNote').textContent =
+    `Price list: ${fileName} – ${map.size} parts` +
+    (dups ? `, ${dups} duplicate part number(s) ignored` : '') +
+    (skipped ? `, ${skipped} row(s) without a part number skipped` : '');
+}
+
+// Copies the price-list data of a part into a pump item.
+// The typed unit price becomes the End User price (highest tier available); the three tier prices are stored
+// on the item and applied by effPrice() according to the selected pricing category.
+function applyPartToItem(it, row) {
+  it.desc = row.desc || it.desc;
+  it.origin = row.origin || it.origin;
+  if (PUMP_CATS.includes(row.cat)) it.cat = row.cat;
+  if (row.flow) { it.flow = row.flow; it.flowU = 'm³/h'; }
+  if (row.head) { it.head = row.head; it.headU = 'm'; }
+  it.price = row.e || row.c || row.t || it.price;
+  it.priceT = row.t; it.priceC = row.c; it.priceE = row.e;
+}
+
+// Copies the price-list data of a part into a sub item (type is taken from the ProductType column).
+function applyPartToSub(s, row) {
+  const ty = row.type.toLowerCase();
+  s.type = ty.includes('access') ? 'Accessories' : ty.includes('spare') ? 'Spare Part' : 'Other';
+  s.desc = row.desc || s.desc;
+  s.origin = row.origin || s.origin;
+  s.price = row.e || row.c || row.t || s.price;
+  s.priceT = row.t; s.priceC = row.c; s.priceE = row.e;
+}
+
+// Handles the "Load price list" button: reads the Products sheet of an Excel file (or a CSV file).
+$('#priceFile').addEventListener('change', async e => {
+  const f = e.target.files[0];
+
+  // Reset the file input so the same file can be selected again.
+  e.target.value = '';
+
+  if (!f) return;
+
+  try {
+    if (typeof XLSX === 'undefined') {
+      throw new Error('Excel reader not loaded. Check your internet connection and reload.');
+    }
+
+    const wb = /\.csv$/i.test(f.name)
+      ? XLSX.read(await f.text(), { type: 'string' })
+      : XLSX.read(await f.arrayBuffer(), { type: 'array' });
+
+    // Prefer a sheet named "Products", then any sheet with "price" in its name, then the first sheet.
+    const sheetName =
+      wb.SheetNames.find(n => /^products?$/i.test(n)) ||
+      wb.SheetNames.find(n => /price/i.test(n)) ||
+      wb.SheetNames[0];
+
+    setPriceList(XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '' }), f.name);
+  } catch (err) {
+    alert('Could not read the price list: ' + err.message);
+  }
+});
+
+// Looks up a part number when it is entered (on leaving the field, pressing Enter, or choosing a suggestion)
+// and fills the pump item or sub item from the price list.
+$('#items').addEventListener('change', e => {
+  const t = e.target;
+  const isPump = t.dataset.f === 'partNo';
+  const isSub = t.dataset.sf === 'partNo';
+
+  if (!isPump && !isSub) return;
+
+  const it = state.items.find(x => x.id === t.closest('.item').dataset.id);
+  const o = isPump ? it : it.subItems.find(x => x.id === t.closest('[data-sid]').dataset.sid);
+  const pn = t.value.trim();
+  const note = t.parentElement.querySelector('.pn-note');
+
+  // Shows a status under the field without rebuilding the form (keeps the cursor where it is).
+  const say = (ok, text, needsList) => {
+    pnNotes[o.id] = { ok, text, needsList };
+    if (note) { note.textContent = text; note.style.color = ok ? '#1d6b2e' : '#a32727'; }
+  };
+
+  if (!pn) { delete pnNotes[o.id]; if (note) note.textContent = ''; return; }
+  if (!priceList) return say(false, 'Load a price list first (header button).', true);
+
+  const row = priceList.map.get(pnKey(pn));
+  if (!row) return say(false, 'Not found in the price list – enter the details manually.');
+
+  // Ask before replacing details that were typed by hand.
+  const wasFilled = pnNotes[o.id] && pnNotes[o.id].filled;
+  if (!wasFilled && (o.desc || o.price) && (o.desc !== row.desc) &&
+      !confirm(`Replace the current description and prices with the price-list data for ${row.part}?`)) {
+    return say(true, 'Found – your entries were kept.');
+  }
+
+  if (isPump) applyPartToItem(o, row); else applyPartToSub(o, row);
+
+  pnNotes[o.id] = { ok: true, text: 'Filled from the price list.', filled: true };
+  renderItems();
+  refresh();
+});
 
 /* ==========================================================================
  * 14. APPLICATION INITIALIZATION
